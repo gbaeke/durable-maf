@@ -4,7 +4,8 @@ A durable agent in Microsoft Agent Framework (Python, `agent-framework-durableta
 runs a long multi-step task and **survives a hard crash of its worker process**.
 
 - **Durable state:** local [Durable Task Scheduler emulator](https://learn.microsoft.com/azure/azure-functions/durable/durable-task-scheduler/develop-with-durable-task-scheduler) (Docker), no Azure needed
-- **LLM:** Luna through the local [agentgateway](https://agentgateway.dev) on `localhost:4000`
+- **LLM:** Luna through the local [agentgateway](https://agentgateway.dev) on `localhost:4000`.
+  No gateway? Point it straight at OpenAI or Microsoft Foundry, see [Use your own model](#use-your-own-model-without-agentgateway).
 - **Hosting:** self-hosted worker process (bring-your-own-compute model)
 
 ## What it does
@@ -84,7 +85,7 @@ Watch it live in the dashboard: <http://localhost:8082> → task hub `durable-ma
 # infra
 docker run -d --name dts-emulator -e DTS_TASK_HUB_NAMES=durable-maf \
   -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest
-agentgateway -f ~/.config/agentgateway/config.yaml &
+agentgateway -f ~/.config/agentgateway/config.yaml &   # skip if you call OpenAI/Foundry directly
 
 uv run worker.py                                   # terminal 1
 ID=$(uv run client.py start "Some topic" --sections 8)   # terminal 2
@@ -112,8 +113,42 @@ uv run client.py wait $ID
 |---|---|---|
 | `DTS_ENDPOINT` | `http://localhost:8080` | emulator gRPC endpoint |
 | `TASKHUB` | `durable-maf` | must exist in the emulator (`DTS_TASK_HUB_NAMES`) |
-| `GATEWAY_URL` | `http://localhost:4000/v1` | agentgateway, OpenAI-compatible |
-| `MODEL` | `azure-gpt-6-luna` | gateway route; `gpt-6-luna` once its OpenAI key is renewed |
+| `GATEWAY_URL` | `http://localhost:4000/v1` | any OpenAI-compatible `/v1` base URL (agentgateway, OpenAI, Foundry) |
+| `GATEWAY_API_KEY` | `unused` | API key sent to that URL; not needed for agentgateway, which holds the provider keys |
+| `MODEL` | `azure-gpt-6-luna` | model name (OpenAI), deployment name (Foundry) or gateway route |
+
+## Use your own model without agentgateway
+
+The code only needs an OpenAI-compatible endpoint, so you can skip agentgateway and set three
+variables in `.env`:
+
+**OpenAI**
+
+```bash
+GATEWAY_URL=https://api.openai.com/v1
+GATEWAY_API_KEY=sk-...
+MODEL=gpt-5-mini            # any model you have access to
+```
+
+**Microsoft Foundry (Azure OpenAI)**: use the v1 endpoint of your resource and the name of your
+*deployment* (not the model name):
+
+```bash
+GATEWAY_URL=https://<your-resource>.openai.azure.com/openai/v1/
+# or, for a Foundry resource: https://<your-resource>.services.ai.azure.com/openai/v1/
+GATEWAY_API_KEY=<key from Keys and Endpoint in the portal>
+MODEL=<your-deployment-name>
+```
+
+What the model has to support:
+
+- **Structured output** (JSON schema): the planner returns an `Outline`, the agent mode a `FinalAnswer`.
+- **Function calling**: the `agent` and `durable-tools` modes.
+- **The Responses API** (`/v1/responses`) for the `agent` and `durable-tools` modes. They run with
+  `store=False`. The `orchestration` and `workflow` modes use Chat Completions.
+
+`demo.sh` only tries to start agentgateway when it is installed, so it works unchanged without it.
+Keep `.env` out of git (it is in `.gitignore`), because it now holds your key.
 
 ## Notes
 

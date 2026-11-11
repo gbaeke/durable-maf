@@ -30,7 +30,7 @@ mkdir -p "$LOG_DIR"
 : > output/llm_calls.log   # fresh call log per demo run
 
 # --- infrastructure ----------------------------------------------------------
-if ! ss -ltn | grep -q ':4000 '; then
+if command -v agentgateway >/dev/null && ! ss -ltn | grep -q ':4000 '; then
   echo "▶ starting agentgateway"
   mkdir -p ~/.local/state/agentgateway
   nohup agentgateway -f ~/.config/agentgateway/config.yaml >~/.local/state/agentgateway/agentgateway.log 2>&1 &
