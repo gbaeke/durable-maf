@@ -1,0 +1,927 @@
+<title>Durable Report Agent</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a run's event history as the spine. Sticky step index on the left, step cards on the right;
+   one architecture map up top and a replay stepper that walks the real crash run event by event. */
+:root {
+  --paper: #f5f7f8;
+  --surface: #ffffff;
+  --ink: #17232b;
+  --ink-soft: #4d5d68;
+  --rule: #d8e0e5;
+  --code-bg: #eef2f4;
+  --accent: #0f6b74;        /* durable state / scheduler teal */
+  --accent-soft: #d9eef0;
+  --replay: #5b4bb5;        /* replayed from history */
+  --replay-soft: #e7e4f7;
+  --crash: #c2410c;         /* failure */
+  --crash-soft: #fbe5d9;
+  --llm: #8a6a00;           /* real model call */
+  --llm-soft: #f6edc9;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0f171c; --surface: #16222a; --ink: #e3eaee; --ink-soft: #9fb0bb; --rule: #2a3a44;
+    --code-bg: #1c2b34; --accent: #4fc1cb; --accent-soft: #143a3f; --replay: #a99bf0; --replay-soft: #2a2550;
+    --crash: #fb8a55; --crash-soft: #45200f; --llm: #e3c45c; --llm-soft: #3a3110; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0f171c; --surface: #16222a; --ink: #e3eaee; --ink-soft: #9fb0bb; --rule: #2a3a44;
+  --code-bg: #1c2b34; --accent: #4fc1cb; --accent-soft: #143a3f; --replay: #a99bf0; --replay-soft: #2a2550;
+  --crash: #fb8a55; --crash-soft: #45200f; --llm: #e3c45c; --llm-soft: #3a3110; color-scheme: dark;
+}
+
+body { background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 16px; line-height: 1.6; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 40px 80px; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2rem, 4.5vw, 3.1rem); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.01em; }
+h3 { font-size: 1.25rem; font-weight: 700; }
+p { margin: 0; }
+code, pre, .mono { font-family: var(--font-mono); }
+code { font-size: 0.86em; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.eyebrow { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
+.lede { max-width: 66ch; color: var(--ink-soft); font-size: 1.08rem; }
+
+/* header */
+header.intro { display: grid; gap: 16px; padding-bottom: 32px; border-bottom: 1px solid var(--rule); }
+.facts { display: flex; flex-wrap: wrap; gap: 8px; }
+.fact { font-family: var(--font-mono); font-size: 0.78rem; padding: 4px 10px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); color: var(--ink-soft); }
+.fact b { color: var(--ink); font-weight: 600; }
+
+/* legend */
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.85rem; color: var(--ink-soft); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+section.block { padding-block: 48px 8px; display: grid; gap: 20px; }
+.tldr { margin-top: 28px; padding: 20px 24px; background: var(--surface); border: 1px solid var(--accent); border-radius: 12px; display: grid; gap: 10px; }
+.tldr h2 { font-size: 1.15rem; color: var(--accent); letter-spacing: 0.02em; }
+.tldr ul { margin: 0; padding-left: 1.2em; display: grid; gap: 8px; max-width: 80ch; }
+.tldr ul ul { margin-top: 6px; gap: 4px; }
+.tldr li { font-size: 0.97rem; }
+
+/* architecture */
+.diagram { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 12px; }
+.diagram svg { display: block; min-width: 760px; width: 100%; height: auto; }
+.d-box { fill: var(--surface); stroke: var(--rule); stroke-width: 1.5; }
+.d-hub { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.d-inner { fill: var(--surface); stroke: var(--accent); stroke-width: 1; }
+.d-worker { fill: var(--surface); stroke: var(--ink-soft); stroke-width: 1.5; }
+.d-llm { fill: var(--llm-soft); stroke: var(--llm); stroke-width: 1.5; }
+.d-title { font-family: var(--font-display); font-weight: 700; font-size: 15px; fill: var(--ink); }
+.d-text { font-family: var(--font-body); font-size: 12.5px; fill: var(--ink-soft); }
+.d-mono { font-family: var(--font-mono); font-size: 11.5px; fill: var(--ink-soft); }
+.d-line { stroke: var(--ink-soft); stroke-width: 1.5; fill: none; }
+.d-line.llm { stroke: var(--llm); }
+.d-line.hub { stroke: var(--accent); }
+.d-arrow { fill: var(--ink-soft); }
+.d-arrow.llm { fill: var(--llm); }
+.d-arrow.hub { fill: var(--accent); }
+.d-label { font-family: var(--font-mono); font-size: 11px; fill: var(--ink); }
+.d-label-bg { fill: var(--paper); }
+
+/* steps */
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; align-items: start; }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 20px); display: grid; gap: 2px; font-size: 0.88rem; }
+nav.toc .eyebrow { margin-bottom: 8px; }
+nav.toc a { color: var(--ink-soft); text-decoration: none; padding: 5px 10px; border-left: 2px solid var(--rule); display: flex; gap: 8px; }
+nav.toc a:hover { color: var(--ink); border-left-color: var(--accent); }
+nav.toc a .n { font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent); min-width: 1.4em; padding-top: 0.1em; }
+.steps { display: grid; gap: 28px; min-width: 0; }
+article.step { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 24px; display: grid; gap: 18px; min-width: 0; scroll-margin-top: 20px; }
+.step-head { display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+.step-num { font-family: var(--font-mono); font-weight: 600; font-size: 0.85rem; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 2px 8px; }
+.step-where { font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink-soft); margin-left: auto; }
+.step.crash { border-color: var(--crash); }
+.step.crash .step-num { color: var(--crash); border-color: var(--crash); }
+.step.replay { border-color: var(--replay); }
+.step.replay .step-num { color: var(--replay); border-color: var(--replay); }
+
+.wwn { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.wwn > div { min-width: 0; display: grid; gap: 6px; align-content: start; padding: 14px; border-radius: 8px; background: var(--paper); }
+.wwn h4 { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-soft); font-weight: 600; }
+.wwn p, .wwn li { font-size: 0.93rem; }
+.wwn ul { margin: 0; padding-left: 1.1em; display: grid; gap: 4px; }
+
+pre.code { margin: 0; background: var(--code-bg); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-size: 0.82rem; line-height: 1.55; tab-size: 4; }
+pre.code .c { color: var(--ink-soft); font-style: italic; }
+pre.code .k { color: var(--replay); font-weight: 600; }
+pre.code .y { color: var(--accent); font-weight: 600; }
+pre.code .s { color: var(--llm); }
+pre.code .x { color: var(--crash); font-weight: 600; }
+
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.85rem; }
+.chip { font-family: var(--font-mono); font-size: 0.78rem; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--rule); background: var(--paper); }
+.chip.hub { border-color: var(--accent); background: var(--accent-soft); }
+.chip.llm { border-color: var(--llm); background: var(--llm-soft); }
+.chip.crash { border-color: var(--crash); background: var(--crash-soft); }
+.chip.replay { border-color: var(--replay); background: var(--replay-soft); }
+.arrow { color: var(--ink-soft); }
+
+.note { font-size: 0.9rem; padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; }
+.note.warn { border-left-color: var(--crash); background: var(--crash-soft); }
+
+/* replay stepper */
+.sim { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 20px; display: grid; gap: 16px; }
+.sim-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button.btn { font-family: var(--font-body); font-size: 0.9rem; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--surface); cursor: pointer; }
+button.btn.ghost { background: transparent; color: var(--accent); }
+button.btn:disabled { opacity: 0.4; cursor: default; }
+.sim-pos { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink-soft); margin-left: auto; font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.sim-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; }
+.panel { min-width: 0; border: 1px solid var(--rule); border-radius: 8px; padding: 14px; display: grid; gap: 10px; align-content: start; }
+.panel h4 { margin: 0; font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-soft); font-weight: 600; }
+.now { display: grid; gap: 8px; }
+.now .time { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.now .what { font-family: var(--font-display); font-size: 1.2rem; font-weight: 700; line-height: 1.25; }
+.now .why { font-size: 0.93rem; color: var(--ink-soft); }
+.procs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.proc { border-radius: 8px; padding: 10px; border: 1px solid var(--rule); font-size: 0.85rem; display: grid; gap: 2px; }
+.proc .pn { font-family: var(--font-mono); font-size: 0.75rem; color: var(--ink-soft); }
+.proc .ps { font-weight: 600; }
+.proc.alive { border-color: var(--accent); }
+.proc.dead { border-color: var(--crash); background: var(--crash-soft); }
+.proc.off { opacity: 0.5; }
+ol.history { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-family: var(--font-mono); font-size: 0.78rem; max-height: 360px; overflow-y: auto; }
+ol.history li { display: grid; grid-template-columns: 2.2em minmax(0, 1fr) auto; gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--paper); align-items: baseline; }
+ol.history li .i { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+ol.history li .t { overflow-wrap: anywhere; }
+ol.history li .tag { font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+ol.history li.new { outline: 1.5px solid var(--accent); }
+ol.history li.replayed { background: var(--replay-soft); }
+.tag.hub { background: var(--accent-soft); color: var(--accent); }
+.tag.llm { background: var(--llm-soft); color: var(--llm); }
+.tag.crash { background: var(--crash-soft); color: var(--crash); }
+.tag.replay { background: var(--replay-soft); color: var(--replay); }
+.empty { color: var(--ink-soft); font-size: 0.85rem; }
+
+/* dashboard */
+.glossary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.gterm { min-width: 0; padding: 14px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); display: grid; gap: 6px; align-content: start; }
+.gterm h4 { margin: 0; font-family: var(--font-display); font-size: 1.05rem; }
+.gterm p { font-size: 0.93rem; }
+.dash { display: grid; grid-template-columns: 220px minmax(0, 1fr); background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden; }
+.dash-nav { display: grid; gap: 2px; align-content: start; padding: 18px 12px; background: var(--paper); border-right: 1px solid var(--rule); }
+.dn-h { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.12em; color: var(--ink-soft); padding: 0 10px 8px; }
+.dn { color: var(--ink); text-decoration: none; padding: 8px 10px; border-radius: 6px; font-size: 0.93rem; }
+.dn:hover { background: var(--accent-soft); }
+.dn.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.dash-defs { margin: 0; padding: 8px 20px; display: grid; }
+.dash-defs > div { padding: 12px 0; border-bottom: 1px solid var(--rule); display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 16px; scroll-margin-top: 20px; }
+.dash-defs > div:last-child { border-bottom: 0; }
+.dash-defs > div:target { background: var(--accent-soft); margin-inline: -20px; padding-inline: 20px; }
+.dash-defs dt { font-family: var(--font-display); font-weight: 700; }
+.dash-defs dd { margin: 0; font-size: 0.93rem; color: var(--ink-soft); }
+.dash-defs dd b, .dash-defs dd em { color: var(--ink); }
+table.ent td:first-child code { color: var(--accent); }
+table.cmp td:first-child { font-weight: 600; white-space: nowrap; }
+table.cmp td code { white-space: normal; overflow-wrap: anywhere; }
+table.cmp { min-width: 760px; }
+.replay-l { stroke: var(--replay); }
+.d-crashbox { fill: var(--crash-soft); stroke: var(--crash); stroke-width: 1.5; }
+.replay-a { fill: var(--replay); }
+section.block h3 { margin-top: 12px; }
+
+/* table */
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); font-weight: 600; }
+td code { white-space: nowrap; }
+
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--ink-soft); font-size: 0.88rem; display: grid; gap: 6px; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  nav.toc { position: static; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  .wwn { grid-template-columns: minmax(0, 1fr); }
+  .sim-grid { grid-template-columns: minmax(0, 1fr); }
+  .glossary { grid-template-columns: minmax(0, 1fr); }
+  .dash { grid-template-columns: minmax(0, 1fr); }
+  .dash-nav { border-right: 0; border-bottom: 1px solid var(--rule); grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  .dash-nav .dn-h { grid-column: 1 / -1; }
+  .dash-defs > div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  ol.history li.new { animation: pop 0.35s ease-out; }
+  @keyframes pop { from { transform: translateX(-6px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+}
+</style>
+
+<div class="wrap">
+
+<header class="intro">
+  <span class="eyebrow">durable-maf · code walkthrough</span>
+  <h1>How the durable report agent survives a crash</h1>
+  <p class="lede">A step-by-step tour of <code>worker.py</code> (the orchestration version), <code>client.py</code> and <code>demo.sh</code>. Shared pieces now live in <code>report.py</code>. The <a href="#workflow">workflow version</a> and the two <a href="#agents">agent versions</a> at the end cover only what's different. For each step: what the code does, why it is built that way, and what has to be in place for it to work. The replay stepper further down walks through a real run in which the worker was killed on section 3.</p>
+  <div class="facts">
+    <span class="fact">agent-framework-durabletask <b>1.0.0</b> (GA)</span>
+    <span class="fact">durabletask <b>1.13.0</b></span>
+    <span class="fact">DTS emulator <b>:8080</b> · dashboard <b>:8082</b></span>
+    <span class="fact">task hub <b>durable-maf</b></span>
+    <span class="fact">agentgateway <b>:4000</b> → <b>azure-gpt-6-luna</b></span>
+    <span class="fact">four versions: <b>orchestration</b> · <a href="#workflow"><b>workflow</b></a> · <a href="#agents"><b>agent</b></a> · <a href="#agents"><b>durable-tools</b></a></span>
+  </div>
+  <div class="legend" aria-label="Colour legend">
+    <span><i class="sw" style="background:var(--accent)"></i>Durable state in the scheduler</span>
+    <span><i class="sw" style="background:var(--llm)"></i>Real model call</span>
+    <span><i class="sw" style="background:var(--replay)"></i>Answered from history (replay)</span>
+    <span><i class="sw" style="background:var(--crash)"></i>Failure</span>
+  </div>
+</header>
+
+<section class="tldr" aria-labelledby="tldr-h">
+  <h2 id="tldr-h">TL;DR</h2>
+  <ul>
+    <li><b>What it is:</b> a report-writing agent on Microsoft Agent Framework's Durable Extension (GA), running against the local Durable Task Scheduler emulator, with Luna behind agentgateway. <code>./demo.sh</code> kills the worker on section 3 and a new worker finishes the job.</li>
+    <li><b>How durability works:</b> every checkpoint is recorded in the scheduler's history. After a crash, the new worker replays that history and continues at the first unfinished step. Finished model calls come from the record and are not repeated.</li>
+    <li><b>Four versions, one setting</b> (<code>MODE=…</code>):
+      <ul>
+        <li><code>orchestration</code>: we wrote the steps as Python code.</li>
+        <li><code>workflow</code>: the same steps as an Agent Framework workflow graph.</li>
+        <li><code>agent</code>: one agent with tools decides the steps itself, but its whole tool loop is a single checkpoint.</li>
+        <li><code>durable-tools</code>: the same agent, with a checkpoint after every model call and every tool call, like Dapr Agents.</li>
+      </ul>
+    </li>
+    <li><b>What a crash costs:</b> only the interrupted step runs again, except in <code>agent</code> mode, where the whole agent run restarts (12 model calls instead of 8). Steps can run twice, so they must be safe to repeat.</li>
+    <li><b>Watch out for:</b>
+      <ul>
+        <li>The scheduler caps each stored item at 1 MB. The writer's conversation and the workflow's event log keep growing.</li>
+        <li>Agents that use tools need the Responses API, because Luna rejects tools on Chat Completions.</li>
+        <li><code>durable-tools</code> relies on one private function of the extension, so keep the package version pinned.</li>
+      </ul>
+    </li>
+  </ul>
+</section>
+
+<section class="block" id="map">
+  <span class="eyebrow">The moving parts</span>
+  <h2>Who talks to whom</h2>
+  <p class="lede">The worker holds no state you can't afford to lose. Everything that matters lives in the task hub inside the emulator: the orchestration's event history, the agents' conversations (stored as durable entities), and the queues of pending work. Any worker that connects to the same task hub can carry on.</p>
+  <div class="diagram">
+    <svg viewBox="0 0 960 430" role="img" aria-label="Architecture: client.py and the dashboard talk to the Durable Task Scheduler emulator; the worker process pulls work items from it and calls agentgateway, which forwards to the Luna model on Azure Foundry.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ah-hub" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow hub" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ah-llm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow llm" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+
+      <!-- client -->
+      <rect class="d-box" x="20" y="40" width="170" height="110" rx="10"/>
+      <text class="d-title" x="36" y="68">client.py</text>
+      <text class="d-mono" x="36" y="92">start "topic"</text>
+      <text class="d-mono" x="36" y="110">status &lt;id&gt;</text>
+      <text class="d-mono" x="36" y="128">wait &lt;id&gt;</text>
+
+      <!-- dashboard -->
+      <rect class="d-box" x="20" y="250" width="170" height="90" rx="10"/>
+      <text class="d-title" x="36" y="278">Dashboard</text>
+      <text class="d-mono" x="36" y="300">localhost:8082</text>
+      <text class="d-text" x="36" y="320">reads the same state</text>
+
+      <!-- DTS -->
+      <rect class="d-hub" x="270" y="20" width="330" height="390" rx="12"/>
+      <text class="d-title" x="290" y="48">Durable Task Scheduler emulator</text>
+      <text class="d-mono" x="290" y="68">docker · gRPC :8080 · task hub durable-maf</text>
+      <rect class="d-inner" x="290" y="86" width="290" height="92" rx="8"/>
+      <text class="d-title" x="306" y="110" style="font-size:13.5px">Orchestration history</text>
+      <text class="d-text" x="306" y="130">append-only events per instance:</text>
+      <text class="d-mono" x="306" y="148">ExecutionStarted, TaskScheduled,</text>
+      <text class="d-mono" x="306" y="164">TaskCompleted, EntityResponse …</text>
+      <rect class="d-inner" x="290" y="192" width="290" height="92" rx="8"/>
+      <text class="d-title" x="306" y="216" style="font-size:13.5px">Entities (agent sessions)</text>
+      <text class="d-mono" x="306" y="236">@dafx-planner@…</text>
+      <text class="d-mono" x="306" y="252">@dafx-writer@…  ← all 6 sections</text>
+      <text class="d-mono" x="306" y="268">@dafx-editor@…</text>
+      <rect class="d-inner" x="290" y="298" width="290" height="92" rx="8"/>
+      <text class="d-title" x="306" y="322" style="font-size:13.5px">Work-item queues</text>
+      <text class="d-text" x="306" y="342">orchestrator, activity and entity</text>
+      <text class="d-text" x="306" y="358">work, locked while a worker has it;</text>
+      <text class="d-text" x="306" y="374">handed out again if the worker dies</text>
+
+      <!-- worker -->
+      <rect class="d-worker" x="680" y="20" width="260" height="250" rx="12"/>
+      <text class="d-title" x="698" y="48">worker.py (any number)</text>
+      <text class="d-mono" x="698" y="68">DurableTaskSchedulerWorker</text>
+      <text class="d-text" x="698" y="96">Orchestrator</text>
+      <text class="d-mono" x="712" y="114">research_report</text>
+      <text class="d-text" x="698" y="142">Activities</text>
+      <text class="d-mono" x="712" y="160">save_section, save_report</text>
+      <text class="d-text" x="698" y="188">Agent entities</text>
+      <text class="d-mono" x="712" y="206">Planner · Writer · Editor</text>
+      <text class="d-text" x="698" y="234">Middleware</text>
+      <text class="d-mono" x="712" y="252">log_llm_calls → llm_calls.log</text>
+
+      <!-- gateway -->
+      <rect class="d-llm" x="680" y="300" width="125" height="110" rx="10"/>
+      <text class="d-title" x="694" y="326">agentgateway</text>
+      <text class="d-mono" x="694" y="348">:4000/v1</text>
+      <text class="d-text" x="694" y="368">holds the</text>
+      <text class="d-text" x="694" y="384">provider key</text>
+      <rect class="d-llm" x="820" y="300" width="120" height="110" rx="10"/>
+      <text class="d-title" x="834" y="326">Luna</text>
+      <text class="d-mono" x="834" y="348">gpt-6-luna</text>
+      <text class="d-text" x="834" y="368">Azure Foundry</text>
+      <text class="d-text" x="834" y="384">ai-geert</text>
+
+      <!-- arrows -->
+      <path class="d-line hub" d="M190 95 L268 95" marker-end="url(#ah-hub)"/>
+      <rect class="d-label-bg" x="196" y="76" width="66" height="14" rx="3"/>
+      <text class="d-label" x="200" y="87">schedule</text>
+      <path class="d-line" d="M190 295 L268 295" marker-end="url(#ah)"/>
+      <rect class="d-label-bg" x="200" y="276" width="56" height="14" rx="3"/>
+      <text class="d-label" x="204" y="287">reads</text>
+      <path class="d-line hub" d="M678 110 L602 110" marker-end="url(#ah-hub)"/>
+      <path class="d-line hub" d="M602 150 L678 150" marker-end="url(#ah-hub)"/>
+      <rect class="d-label-bg" x="606" y="116" width="70" height="28" rx="3"/>
+      <text class="d-label" x="610" y="127">pull work</text>
+      <text class="d-label" x="610" y="141">push result</text>
+      <path class="d-line llm" d="M742 270 L742 298" marker-end="url(#ah-llm)"/>
+      <path class="d-line llm" d="M805 355 L818 355" marker-end="url(#ah-llm)"/>
+    </svg>
+  </div>
+</section>
+
+<section class="block" id="dashboard">
+  <span class="eyebrow">Reading the dashboard</span>
+  <h2>What you see at localhost:8082</h2>
+  <p class="lede">The dashboard is a window onto what the scheduler has stored. It runs nothing itself. A few words first, assuming no prior knowledge.</p>
+
+  <div class="glossary">
+    <div class="gterm"><h4>Scheduler</h4><p>The service that stores durable state and hands out work. Here that's the emulator in Docker, shown as <b>emulator</b> in the breadcrumb at the top.</p></div>
+    <div class="gterm"><h4>Task hub</h4><p>One named, isolated box of state inside a scheduler, like a database inside a database server. Ours is <b>durable-maf</b>. Workers and clients only see the hub they connect to. Everything under the <b>TASK HUB</b> heading on the left is about the hub you selected.</p></div>
+    <div class="gterm"><h4>Instance</h4><p>One run of something. Every <code>./demo.sh</code> creates one orchestration instance, plus three agent entities.</p></div>
+  </div>
+
+  <div class="dash">
+    <div class="dash-nav" aria-hidden="true">
+      <span class="dn-h">TASK HUB</span>
+      <a href="#d-orch" class="dn">Orchestrations</a>
+      <a href="#d-ent" class="dn on">Entities</a>
+      <a href="#d-agents" class="dn">Agents</a>
+      <a href="#d-sched" class="dn">Schedules</a>
+      <a href="#d-workers" class="dn">Workers &amp; Metrics</a>
+      <a href="#d-config" class="dn">Configuration</a>
+    </div>
+    <dl class="dash-defs">
+      <div id="d-orch"><dt>Orchestrations</dt><dd><p>One row per workflow run: our <code>research_report</code> instances. Open one to see its status (Running, Completed, Failed), input, output, custom status (<em>writing 3/6</em>) and the full <b>history</b>: the list of events the replay stepper below walks through. This is where you watch the crash: the instance stays <em>Running</em> with no new events until worker #2 arrives.</p></dd></div>
+      <div id="d-ent"><dt>Entities</dt><dd><p>A durable entity is a small, named object whose <b>state is kept by the scheduler</b> and changed only by messages sent to it, one at a time. Agent Framework stores every <b>agent session</b> (one conversation) as an entity. That's what the screenshot shows. Explained row by row below.</p></dd></div>
+      <div id="d-agents"><dt>Agents</dt><dd><p>The same entities, shown the Agent Framework way: per agent, its sessions and the conversation inside them (prompts, replies, tool calls). It's a preview feature. Switch on <em>Enable Agent pages</em> in the gear menu at the top right if it's empty.</p></dd></div>
+      <div id="d-sched"><dt>Schedules</dt><dd><p>Orchestrations that start automatically on a timer, like a cron job ("run this report every morning"). This demo starts runs by hand, so the page is empty.</p></dd></div>
+      <div id="d-workers"><dt>Workers &amp; Metrics</dt><dd><p>Which worker processes are connected right now and how much work flows through the hub. During <code>demo.sh</code> you'd see worker #1 disappear and worker #2 appear. When no worker runs, nothing gets processed, but nothing is lost either.</p></dd></div>
+      <div id="d-config"><dt>Configuration</dt><dd><p>Settings for this task hub and the dashboard. The emulator has few options; in Azure this is where hub settings live.</p></dd></div>
+    </dl>
+  </div>
+
+  <h3>The Entities table, decoded</h3>
+  <div class="tbl">
+    <table class="ent">
+      <thead><tr><th>Entity name</th><th>Entity key</th><th>Last modified</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>dafx-planner</code></td><td><code>8e70589e-00ac-5b9e-…</code></td><td>9:11:1…</td><td>Planner session of the 10:11 run (the one with the crash)</td></tr>
+        <tr><td><code>dafx-writer</code></td><td><code>c67eeaad-9c5b-5780-…</code></td><td>9:12:0…</td><td>Writer session of that run: holds all 6 sections, updated last</td></tr>
+        <tr><td><code>dafx-editor</code></td><td><code>972d4714-785d-5f24-…</code></td><td>9:12:0…</td><td>Editor session of that run: one prompt, one summary</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="wwn">
+    <div><h4>Entity name</h4><p>The <b>type</b> of entity: <code>dafx-</code> + the agent's name. <code>dafx</code> is the prefix Agent Framework uses for its entities. So there's one name per agent you registered in step 4.</p></div>
+    <div><h4>Entity key</h4><p>Which <b>instance</b> of that type: the session id from <code>create_session()</code>. Name + key together is the entity's address. The <code>5</code> at the start of the third group marks a UUID version 5, which is computed from inputs instead of picked at random. That's why replay finds the same session again after a crash.</p></div>
+    <div><h4>Last modified</h4><p>When the entity's state last changed: its last message. Shown in UTC, so <b>9:11</b> here is <b>10:11</b> local time. The writer is the newest of each trio because it's used until the last section.</p></div>
+  </div>
+  <p class="note">Why 12 rows? Every run creates 3 new sessions (Planner, Writer, Editor), and you can see 4 runs: around 6:50, 6:51–6:52, 6:53–6:54 and 9:11 UTC. Entities <b>stay</b> after their orchestration finishes. That's the point of a durable session: you could keep talking to it later. They disappear when the emulator restarts (it keeps state in memory) or, in a real deployment, when the session time-to-live cleans up idle sessions.</p>
+</section>
+
+<section class="block" id="replay">
+  <span class="eyebrow">The real run, event by event</span>
+  <h2>Replay stepper</h2>
+  <p class="lede">These are the events from run <code>51da2300…</code> (timestamps from <code>demo.sh</code>). Step through and watch the history grow. After the crash, the second worker reads the same history back: everything purple is answered from the record, and the model is not called again.</p>
+  <div class="sim">
+    <div class="sim-controls">
+      <button class="btn ghost" id="sim-prev" type="button">Back</button>
+      <button class="btn" id="sim-next" type="button">Next event</button>
+      <button class="btn ghost" id="sim-end" type="button">Jump to end</button>
+      <span class="sim-pos" id="sim-pos">1 / 1</span>
+    </div>
+    <input type="range" id="sim-range" min="0" max="0" value="0" aria-label="Event position">
+    <div class="sim-grid">
+      <div class="panel">
+        <h4>What is happening</h4>
+        <div class="now">
+          <span class="time" id="sim-time"></span>
+          <span class="what" id="sim-what"></span>
+          <span class="why" id="sim-why"></span>
+        </div>
+        <div class="procs">
+          <div class="proc" id="proc1"><span class="pn">worker #1 · pid 3518640</span><span class="ps" id="proc1s"></span></div>
+          <div class="proc" id="proc2"><span class="pn">worker #2 · pid 3520889</span><span class="ps" id="proc2s"></span></div>
+        </div>
+        <div class="flow" id="sim-counts"></div>
+      </div>
+      <div class="panel">
+        <h4>Task hub history (simplified)</h4>
+        <ol class="history" id="sim-history"></ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="steps">
+  <span class="eyebrow">Step by step</span>
+  <h2>From empty machine to finished report</h2>
+</section>
+
+<div class="layout">
+  <nav class="toc" aria-label="Steps">
+    <span class="eyebrow">Steps</span>
+    <a href="#s1"><span class="n">1</span>Infrastructure</a>
+    <a href="#s2"><span class="n">2</span>Configuration</a>
+    <a href="#s3"><span class="n">3</span>Agents via the gateway</a>
+    <a href="#s4"><span class="n">4</span>Register on the worker</a>
+    <a href="#s5"><span class="n">5</span>Start a run</a>
+    <a href="#s6"><span class="n">6</span>Plan the outline</a>
+    <a href="#s7"><span class="n">7</span>Write each section</a>
+    <a href="#s8"><span class="n">8</span>Save to disk</a>
+    <a href="#s9"><span class="n">9</span>The crash</a>
+    <a href="#s10"><span class="n">10</span>Recovery by replay</a>
+    <a href="#s11"><span class="n">11</span>Summary and report</a>
+    <a href="#s12"><span class="n">12</span>Watching progress</a>
+  </nav>
+
+  <div class="steps">
+
+    <article class="step" id="s1">
+      <div class="step-head"><span class="step-num">1</span><h3>Start the infrastructure</h3><span class="step-where">demo.sh · lines 17–28</span></div>
+      <div class="flow"><span class="chip hub">dts-emulator :8080 / :8082</span><span class="chip llm">agentgateway :4000</span></div>
+      <pre class="code"><span class="c"># only start what isn't already listening</span>
+ss -ltn | grep -q <span class="s">':4000 '</span> || nohup agentgateway -f ~/.config/agentgateway/config.yaml &amp;
+docker run -d --name dts-emulator -e <span class="y">DTS_TASK_HUB_NAMES=durable-maf</span> \
+  -p 8080:8080 -p 8082:8082 mcr.microsoft.com/dts/dts-emulator:latest</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>Starts two local services: the Durable Task Scheduler emulator, which stores all durable state, and agentgateway, which forwards model calls to Luna.</p></div>
+        <div><h4>Why</h4><p>The emulator is the same scheduler you would use in Azure, so no cloud account is needed. The gateway keeps provider keys and routing out of the app: the code only knows a URL and a model name.</p></div>
+        <div><h4>Needs</h4><ul><li>Docker</li><li><code>DTS_TASK_HUB_NAMES</code> listing the hub, or the emulator only creates <code>default</code></li><li>agentgateway config with a working Luna route</li></ul></div>
+      </div>
+      <p class="note">The emulator keeps state in memory. Restarting the container wipes past runs, and that also counts as a failure the demo does not recover from. In Azure the scheduler persists state.</p>
+    </article>
+
+    <article class="step" id="s2">
+      <div class="step-head"><span class="step-num">2</span><h3>Shared configuration</h3><span class="step-where">common.py · .env</span></div>
+      <pre class="code"><span class="k">def</span> _dts_kwargs(log_handler):
+    <span class="c"># The emulator needs no credential and no TLS.</span>
+    <span class="k">return</span> dict(host_address=DTS_ENDPOINT, secure_channel=<span class="k">False</span>,
+                taskhub=TASKHUB, token_credential=<span class="k">None</span>, log_handler=log_handler)
+
+<span class="k">def</span> get_worker(...): <span class="k">return</span> DurableTaskSchedulerWorker(**_dts_kwargs(...))
+<span class="k">def</span> get_client(...): <span class="k">return</span> DurableTaskSchedulerClient(**_dts_kwargs(...))</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>Builds the gRPC worker and client for the scheduler from <code>.env</code> settings: endpoint, task hub, gateway URL and model.</p></div>
+        <div><h4>Why</h4><p>Worker and client must point at the same task hub, otherwise the client schedules work that no worker ever sees. One shared module makes that hard to get wrong.</p></div>
+        <div><h4>Needs</h4><ul><li><code>TASKHUB=durable-maf</code></li><li><code>MODEL=azure-gpt-6-luna</code> (the OpenAI <code>gpt-6-luna</code> key has expired)</li><li>For Azure: a token credential and <code>secure_channel=True</code></li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s3">
+      <div class="step-head"><span class="step-num">3</span><h3>Define agents that call Luna through the gateway</h3><span class="step-where">worker.py · make_agent, log_llm_calls</span></div>
+      <div class="flow"><span class="chip">Agent</span><span class="arrow">→</span><span class="chip">OpenAIChatCompletionClient</span><span class="arrow">→</span><span class="chip llm">localhost:4000/v1</span><span class="arrow">→</span><span class="chip llm">Luna</span></div>
+      <pre class="code"><span class="k">def</span> make_agent(name, instructions):
+    client = OpenAIChatCompletionClient(model=MODEL, base_url=GATEWAY_URL,
+                                        api_key=<span class="s">"unused"</span>)  <span class="c"># the gateway holds the real key</span>
+    <span class="k">return</span> Agent(client=client, name=name, instructions=instructions,
+                 middleware=[log_llm_calls])
+
+<span class="y">@chat_middleware</span>
+<span class="k">async def</span> log_llm_calls(context, call_next):
+    <span class="k">await</span> call_next()                      <span class="c"># the real model call</span>
+    LLM_LOG.open(<span class="s">"a"</span>).write(f<span class="s">"{time} pid={os.getpid()}  {label}\n"</span>)</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>Creates three ordinary Agent Framework agents (Planner, Writer, Editor), each with its own instructions. The middleware appends a line to <code>output/llm_calls.log</code> after every real model call.</p></div>
+        <div><h4>Why</h4><p>The agents themselves contain nothing durable. Durability is added when they are hosted (step 4). The log is the proof: a call answered from history never reaches the middleware, so it never appears in the log.</p></div>
+        <div><h4>Needs</h4><ul><li>An OpenAI-compatible endpoint (agentgateway)</li><li>Chat Completions client: stateless, the durable session supplies the history</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s4">
+      <div class="step-head"><span class="step-num">4</span><h3>Register everything on the worker</h3><span class="step-where">worker.py · main()</span></div>
+      <pre class="code">worker = get_worker()
+agent_worker = DurableAIAgentWorker(worker, <span class="y">deployment_mode="isolated_v2"</span>)
+<span class="k">for</span> agent <span class="k">in</span> create_agents():
+    agent_worker.add_agent(agent)          <span class="c"># each agent becomes a durable entity type</span>
+worker.add_orchestrator(research_report)
+worker.add_activity(save_section)
+worker.add_activity(save_report)
+worker.start()                             <span class="c"># opens a gRPC stream and waits for work</span></pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>Wraps the worker so each agent is hosted as a durable entity. One entity instance is one conversation session. Then registers the orchestrator and the two activities by name, and starts pulling work.</p></div>
+        <div><h4>Why</h4><p>The scheduler only hands out work by name. Any worker that registers the same names can run any step of any instance, which is exactly what lets worker #2 continue worker #1's run.</p></div>
+        <div><h4>Needs</h4><ul><li><code>deployment_mode="isolated_v2"</code>: the 1.0 GA release refuses to start without an explicit choice; this one says the task hub belongs to this app alone</li><li>The same registrations on every worker</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s5">
+      <div class="step-head"><span class="step-num">5</span><h3>Start a run</h3><span class="step-where">client.py · start</span></div>
+      <div class="flow"><span class="chip">client.py start</span><span class="arrow">→</span><span class="chip hub">ExecutionStarted</span><span class="arrow">→</span><span class="chip hub">orchestrator work item queued</span></div>
+      <pre class="code">instance_id = client.schedule_new_orchestration(
+    <span class="s">"research_report"</span>, input={<span class="s">"topic"</span>: topic, <span class="s">"sections"</span>: 6})</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>Sends a single request to the scheduler. It records an <code>ExecutionStarted</code> event with the input, queues a work item and returns an instance id straight away.</p></div>
+        <div><h4>Why</h4><p>The client never runs any of the work. It can exit right away, and the run keeps going whether or not any worker is up yet.</p></div>
+        <div><h4>Needs</h4><ul><li>The orchestrator name matches a registered one</li><li>The input is JSON-serialisable and under 1 MB</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s6">
+      <div class="step-head"><span class="step-num">6</span><h3>Plan the outline</h3><span class="step-where">worker.py · research_report</span></div>
+      <div class="flow"><span class="chip">orchestrator yields</span><span class="arrow">→</span><span class="chip hub">call Planner entity</span><span class="arrow">→</span><span class="chip llm">Luna</span><span class="arrow">→</span><span class="chip hub">result recorded</span><span class="arrow">→</span><span class="chip">orchestrator resumes</span></div>
+      <pre class="code">agents = DurableAIAgentOrchestrationContext(context)
+planner = agents.get_agent(<span class="s">"Planner"</span>)
+plan_raw = <span class="y">yield</span> planner.run(
+    messages=f<span class="s">"Plan a report on: {topic}. Use exactly {n} sections."</span>,
+    session=planner.create_session(),
+    options={<span class="s">"response_format"</span>: Outline})   <span class="c"># Pydantic model → structured output</span>
+outline = plan_raw.value</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p><code>planner.run()</code> does not call the model here. It returns a durable task that tells the scheduler to send a message to the Planner entity. The orchestrator then <code>yield</code>s and stops running. The entity makes the model call, the result is recorded in the history, and the orchestrator is woken up again with it.</p></div>
+        <div><h4>Why</h4><p>Every <code>yield</code> is a checkpoint. Results come back through the history, so the scheduler always knows exactly what has finished. The <code>Outline</code> model turns the free-text reply into typed data the loop can rely on.</p></div>
+        <div><h4>Needs</h4><ul><li>Orchestrator code is a generator and deterministic</li><li>Session ids come from <code>create_session()</code> inside the orchestrator, so they are the same on replay</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s7">
+      <div class="step-head"><span class="step-num">7</span><h3>Write each section in one durable session</h3><span class="step-where">worker.py · the for loop</span></div>
+      <pre class="code">writer_session = writer.create_session()
+<span class="k">for</span> i, section <span class="k">in</span> enumerate(outline.sections, start=1):
+    status(<span class="s">"writing"</span>, i - 1, total, section.title)     <span class="c"># custom status for client and dashboard</span>
+    resp = <span class="y">yield</span> writer.run(
+        messages=f<span class="s">"Report: {outline.title}\nWrite section {i}: ..."</span>,
+        session=writer_session)                    <span class="c"># same session → remembers earlier sections</span>
+    path = <span class="y">yield</span> context.call_activity(save_section, input={...})
+    section_texts.append(resp.text)                <span class="c"># rebuilt from history on replay</span></pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>For each section: one checkpointed Writer call, then one checkpointed save. All Writer calls share one session, so the Writer entity's state holds the whole conversation so far.</p></div>
+        <div><h4>Why</h4><p>A shared session keeps the sections consistent without passing earlier text back in by hand. Two yields per section gives two checkpoints, so a crash loses at most the step that was in progress.</p></div>
+        <div><h4>Needs</h4><ul><li>Entity state under 1 MB. This session is what grows. See <a href="payload-limits.md">payload-limits.md</a></li><li>Data the orchestrator uses comes from history, never from disk (<code>section_texts</code>)</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s8">
+      <div class="step-head"><span class="step-num">8</span><h3>Save each section to disk</h3><span class="step-where">worker.py · save_section</span></div>
+      <pre class="code"><span class="k">def</span> save_section(ctx: ActivityContext, data) -> str:
+    out_dir = OUTPUT_DIR / ctx.orchestration_id
+    path = out_dir / f<span class="s">"{data['index']:02d}-{slug}.md"</span>
+    path.write_text(f<span class="s">"## {index}. {title}\n\n{body}\n"</span>)   <span class="c"># overwrite: safe to run twice</span>
+    <span class="k">return</span> str(path)</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>An activity: plain code that does I/O. It writes one Markdown file and returns the path, and the path is recorded in the history.</p></div>
+        <div><h4>Why</h4><p>Orchestrators are replayed, so any side effect in them would run again on every replay. Side effects belong in activities, which run once and have their result recorded.</p></div>
+        <div><h4>Needs</h4><ul><li>Idempotent: activities run <em>at least</em> once</li><li>Shared storage for multiple machines (local disk is fine on one machine)</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step crash" id="s9">
+      <div class="step-head"><span class="step-num">9</span><h3>The crash</h3><span class="step-where">worker.py · save_section, CRASH_ON_SECTION=3</span></div>
+      <div class="flow"><span class="chip llm">section 3 written (recorded)</span><span class="arrow">→</span><span class="chip">save_section 3 picked up</span><span class="arrow">→</span><span class="chip crash">os._exit(137)</span></div>
+      <pre class="code">crash_on = int(os.getenv(<span class="s">"CRASH_ON_SECTION"</span>, <span class="s">"0"</span>))
+marker = out_dir / <span class="s">".crashed"</span>
+<span class="k">if</span> data[<span class="s">"index"</span>] == crash_on <span class="k">and not</span> marker.exists():
+    marker.touch()                    <span class="c"># crash only once per instance</span>
+    <span class="x">os._exit(137)</span>                     <span class="c"># no cleanup, no finally blocks, like kill -9</span></pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>While saving section 3, the worker kills itself instantly. The activity never reports back. The scheduler still holds the work item, locked by a worker that no longer exists.</p></div>
+        <div><h4>Why</h4><p><code>os._exit</code> skips every cleanup handler, the same as an out-of-memory kill or a host restart. The marker file makes sure the second worker doesn't crash too.</p></div>
+        <div><h4>Needs</h4><ul><li>Nothing for recovery. The history already holds the outline and sections 1–3. Only the in-flight save is lost</li></ul></div>
+      </div>
+      <p class="note warn">What is lost at this moment: one unfinished file write. What is kept: four model calls that cost time and tokens, plus the writer's full conversation.</p>
+    </article>
+
+    <article class="step replay" id="s10">
+      <div class="step-head"><span class="step-num">10</span><h3>Recovery by replay</h3><span class="step-where">scheduler + worker #2</span></div>
+      <div class="flow"><span class="chip">worker #2 connects</span><span class="arrow">→</span><span class="chip">save_section 3 runs again</span><span class="arrow">→</span><span class="chip replay">orchestrator replays plan, s1–s3</span><span class="arrow">→</span><span class="chip llm">Writer section 4</span></div>
+      <pre class="code">log = (<span class="k">lambda</span> *a: logger.info(*a)) <span class="k">if not</span> context.<span class="y">is_replaying</span> <span class="k">else</span> (<span class="k">lambda</span> *a: <span class="k">None</span>)
+<span class="c"># On replay every `yield` whose result is already in the history returns it immediately:</span>
+plan_raw = <span class="y">yield</span> planner.run(...)   <span class="c"># → recorded outline, no model call</span>
+resp     = <span class="y">yield</span> writer.run(...)    <span class="c"># → recorded section 1, 2, 3, no model call</span></pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>A fresh worker starts. The scheduler hands it the unfinished <code>save_section 3</code> again, which now succeeds. Then it runs the orchestrator <em>from the top</em>. Every <code>yield</code> with a recorded result returns immediately, until the first step with no result yet: Writer section 4.</p></div>
+        <div><h4>Why</h4><p>Rerunning the code against recorded results rebuilds the exact in-memory state (outline, file paths, section texts) without saving any of it separately. <code>is_replaying</code> keeps the logs from printing everything twice.</p></div>
+        <div><h4>Needs</h4><ul><li>Deterministic orchestrator: no clock, random, disk or network inside it</li><li>The same code version as the run that started (or a versioning strategy)</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s11">
+      <div class="step-head"><span class="step-num">11</span><h3>Summary and final report</h3><span class="step-where">worker.py · Editor, save_report</span></div>
+      <pre class="code">summary = <span class="y">yield</span> editor.run(messages=f<span class="s">"Write the executive summary ...\n\n{full_text}"</span>,
+                           session=editor.create_session())
+report_path = <span class="y">yield</span> context.call_activity(save_report, input={...})
+status(<span class="s">"done"</span>, ...)
+<span class="k">return</span> {<span class="s">"title"</span>: outline.title, <span class="s">"report"</span>: report_path, <span class="s">"sections"</span>: 6}</pre>
+      <div class="wwn">
+        <div><h4>What</h4><p>The Editor gets the full text and writes bullet points. An activity stitches title, summary and sections into <code>report.md</code>. The orchestrator returns a small result, which ends the instance as <code>COMPLETED</code>.</p></div>
+        <div><h4>Why</h4><p>The return value is the orchestration output and is stored in the scheduler, so it stays small: just paths and counts. The report itself stays on disk.</p></div>
+        <div><h4>Needs</h4><ul><li>The Editor prompt holds the whole report. Fine at 10 KB, a problem near 1 MB</li></ul></div>
+      </div>
+    </article>
+
+    <article class="step" id="s12">
+      <div class="step-head"><span class="step-num">12</span><h3>Watch progress</h3><span class="step-where">client.py wait · dashboard</span></div>
+      <pre class="code">state = client.get_orchestration_state(instance_id)
+progress = json.loads(state.serialized_custom_status)
+<span class="c"># → {"phase": "writing", "sections_done": 3, "sections_total": 6, "current": "..."}</span></pre>
+      <div class="wwn">
+        <div><h4>What</h4><p><code>client.py wait</code> polls once a second and prints a line whenever the status changes. The dashboard at <code>localhost:8082</code> shows the same instance, its history and, with <em>Enable Agent pages</em> switched on, each agent's conversation.</p></div>
+        <div><h4>Why</h4><p>Custom status lets a long run report progress without returning anything early. During the crash the status stays at <em>writing 2/6</em>: the run is paused, not failed.</p></div>
+        <div><h4>Needs</h4><ul><li>Task hub <code>durable-maf</code> selected in the dashboard</li><li>Custom status under 1 MB</li></ul></div>
+      </div>
+    </article>
+
+  </div>
+</div>
+
+<section class="block" id="rules">
+  <span class="eyebrow">Rules of thumb</span>
+  <h2>Where each kind of code goes</h2>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Kind</th><th>In this demo</th><th>Runs</th><th>Allowed to</th><th>Not allowed to</th></tr></thead>
+      <tbody>
+        <tr><td>Orchestrator</td><td><code>research_report</code></td><td>Many times (replay)</td><td>Decide what happens next, <code>yield</code> durable tasks, set status</td><td>Read the clock, files or network; use random values</td></tr>
+        <tr><td>Activity</td><td><code>save_section</code>, <code>save_report</code></td><td>At least once</td><td>Any I/O</td><td>Assume it runs exactly once</td></tr>
+        <tr><td>Agent entity</td><td>Planner, Writer, Editor</td><td>Once per message</td><td>Call the model, keep conversation state</td><td>Grow beyond 1 MB of state</td></tr>
+        <tr><td>Client</td><td><code>client.py</code></td><td>Whenever you like</td><td>Start, query, wait, terminate</td><td>Do the work itself</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="block" id="workflow">
+  <span class="eyebrow">Second version · MODE=workflow</span>
+  <h2>The same task as a MAF workflow</h2>
+  <p class="lede"><code>workflow_worker.py</code> builds the same report as an Agent Framework workflow graph instead of a Python loop. The agents, prompts, files, crash and recovery behaviour are the same as above, and both versions share them through <code>report.py</code>. This section only covers what changes.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 960 230" role="img" aria-label="Workflow graph: intake, Planner, dispatcher, Writer, section_saver, Editor, finisher, with a loop edge from section_saver back to Writer for the next section.">
+      <defs>
+        <marker id="wah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="wah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="d-arrow replay-a" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <!-- nodes: x = 10 + k*136, w = 118 -->
+      <rect class="d-worker" x="10" y="50" width="118" height="64" rx="10"/><text class="d-title" x="69" y="80" text-anchor="middle" style="font-size:14px">intake</text><text class="d-mono" x="69" y="100" text-anchor="middle">activity</text>
+      <rect class="d-llm" x="146" y="50" width="118" height="64" rx="10"/><text class="d-title" x="205" y="80" text-anchor="middle" style="font-size:14px">Planner</text><text class="d-mono" x="205" y="100" text-anchor="middle">agent · entity</text>
+      <rect class="d-worker" x="282" y="50" width="118" height="64" rx="10"/><text class="d-title" x="341" y="80" text-anchor="middle" style="font-size:14px">dispatcher</text><text class="d-mono" x="341" y="100" text-anchor="middle">activity</text>
+      <rect class="d-llm" x="418" y="50" width="118" height="64" rx="10"/><text class="d-title" x="477" y="80" text-anchor="middle" style="font-size:14px">Writer</text><text class="d-mono" x="477" y="100" text-anchor="middle">agent · entity</text>
+      <rect class="d-worker" x="554" y="50" width="118" height="64" rx="10"/><text class="d-title" x="613" y="80" text-anchor="middle" style="font-size:14px">section_saver</text><text class="d-mono" x="613" y="100" text-anchor="middle">activity · 💥 here</text>
+      <rect class="d-llm" x="690" y="50" width="118" height="64" rx="10"/><text class="d-title" x="749" y="80" text-anchor="middle" style="font-size:14px">Editor</text><text class="d-mono" x="749" y="100" text-anchor="middle">agent · entity</text>
+      <rect class="d-worker" x="826" y="50" width="118" height="64" rx="10"/><text class="d-title" x="885" y="80" text-anchor="middle" style="font-size:14px">finisher</text><text class="d-mono" x="885" y="100" text-anchor="middle">activity</text>
+      <!-- forward edges -->
+      <path class="d-line" d="M128 82 L144 82" marker-end="url(#wah)"/>
+      <path class="d-line" d="M264 82 L280 82" marker-end="url(#wah)"/>
+      <path class="d-line" d="M400 82 L416 82" marker-end="url(#wah)"/>
+      <path class="d-line" d="M536 82 L552 82" marker-end="url(#wah)"/>
+      <path class="d-line" d="M672 82 L688 82" marker-end="url(#wah)"/>
+      <path class="d-line" d="M808 82 L824 82" marker-end="url(#wah)"/>
+      <!-- loop -->
+      <path class="d-line replay-l" d="M613 114 C613 175, 477 175, 477 118" marker-end="url(#wah-r)"/>
+      <rect class="d-label-bg" x="500" y="164" width="226" height="16" rx="3"/>
+      <text class="d-label" x="506" y="176">send_message(target_id="Writer")</text>
+      <text class="d-label" x="660" y="40">target_id="Editor" when done</text>
+      <text class="d-text" x="10" y="215">Agent nodes become durable entities (one conversation per run). The other nodes become activities. The durable host adds a generic orchestrator, dafx-report_workflow, that walks the graph.</text>
+    </svg>
+  </div>
+
+  <h3>What is different, and why</h3>
+  <div class="tbl">
+    <table class="cmp">
+      <thead><tr><th>Concern</th><th>Orchestration (<code>worker.py</code>)</th><th>Workflow (<code>workflow_worker.py</code>)</th><th>Why it matters</th></tr></thead>
+      <tbody>
+        <tr><td>Who decides the next step</td><td>Your orchestrator code: <code>for</code> loop and <code>yield</code></td><td>A generic orchestrator from the extension follows the edges of your graph</td><td>You write no orchestrator, so you can't break the determinism rules in it either</td></tr>
+        <tr><td>Registration</td><td><code>add_agent</code>, <code>add_orchestrator</code>, <code>add_activity</code> one by one</td><td>One call: <code>configure_workflow(workflow)</code></td><td>Names come from the graph: <code>dafx-report_workflow</code>, <code>dafx-report_workflow-Writer</code>, …</td></tr>
+        <tr><td>Looping</td><td>A Python <code>for</code> over the outline</td><td>An edge from <code>section_saver</code> back to <code>Writer</code>, chosen with <code>send_message(…, target_id=…)</code></td><td>A cycle must end on its own. <code>max_iterations=200</code> caps the number of steps</td></tr>
+        <tr><td>Run-wide data</td><td>Local variables, rebuilt by replay</td><td>Workflow state: <code>ctx.set_state()</code> / <code>ctx.get_state()</code></td><td>Executors run as separate activities, so anything kept on the executor object is lost between steps</td></tr>
+        <tr><td>Agent sessions</td><td>You call <code>create_session()</code> and pass it to each <code>run()</code></td><td>Automatic: one session per agent per run, keyed by the instance id</td><td>The Writer still remembers earlier sections across loop iterations, with no session code</td></tr>
+        <tr><td>Structured planner output</td><td><code>options={"response_format": Outline}</code> per call</td><td><code>response_format</code> set as the agent's default; <code>dispatcher</code> parses the JSON</td><td>Agent nodes just pass their response along the edge. A downstream step reads it</td></tr>
+        <tr><td>Run id for output files</td><td><code>ctx.orchestration_id</code> in the activity</td><td>The client picks the instance id and passes it in the input as <code>run_id</code>. <code>intake</code> stores it in state</td><td>Executors don't get the instance id handed to them</td></tr>
+        <tr><td>Starting a run</td><td><code>schedule_new_orchestration("research_report")</code></td><td><code>DurableWorkflowClient.start_workflow(input, instance_id)</code></td><td><code>client.py start --mode workflow</code> does this for you</td></tr>
+        <tr><td>Result</td><td>The orchestrator's <code>return</code> value</td><td><code>ctx.yield_output()</code> in <code>finisher</code>, with <code>output_from=[finisher]</code></td><td>Without <code>output_from</code>, every agent's response is in the result too</td></tr>
+        <tr><td>Progress</td><td>Your own <code>set_custom_status({phase, …})</code></td><td>The host publishes an event log (<code>executor_invoked</code> / <code>executor_completed</code>)</td><td>Free, but it grows with every step and holds the step data. See below</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Checkpoints and the crash, workflow style</h3>
+  <div class="wwn">
+    <div><h4>Unit of progress</h4><p>The workflow runs in <b>supersteps</b>: all messages that are ready get delivered, each target node runs once, and their outgoing messages wait for the next superstep. The durable host records each superstep's results and state changes. A section takes two supersteps: Writer, then <code>section_saver</code>.</p></div>
+    <div><h4>What the crash loses</h4><p>The <code>section_saver</code> step for section 3. Workflow state is only updated when a step completes, so the retry sees the same snapshot, gets <code>i = 3</code> again from <code>len(section_files) + 1</code>, and overwrites the same file.</p></div>
+    <div><h4>Needs</h4><ul><li>Every non-agent node is idempotent: it can run twice with the same input and state</li><li>Workflow state is JSON-serialisable (we store <code>outline.model_dump()</code>, not the model object)</li></ul></div>
+  </div>
+  <div class="flow">
+    <span class="chip llm">plan</span><span class="chip llm">s1</span><span class="chip llm">s2</span><span class="chip llm">s3</span><span class="chip crash">save s3 💥 pid 3647600</span><span class="arrow">→</span><span class="chip">save s3 again</span><span class="chip llm">s4</span><span class="chip llm">s5</span><span class="chip llm">s6</span><span class="chip llm">summary</span><span class="chip">pid 3650792</span>
+  </div>
+  <p class="note">Measured in run <code>f782b51a…</code> (MODE=workflow, crash on section 3): 8 model calls, the process id changes once, no call repeated. This is the same result as the orchestration version.</p>
+
+  <h3>New trade-off: the event log</h3>
+  <p class="note warn">When you host the workflow yourself, the extension writes every step's <code>executor_invoked</code> and <code>executor_completed</code> event, <em>with its data</em>, into the orchestration's custom status, so <code>stream_workflow()</code> clients can follow along. That log holds each section's text and keeps growing, and custom status is capped at 1 MB. In this version it fills up before the Writer session does. There's no public switch to turn it off when you host it yourself. Details in <code>docs/payload-limits.md</code>.</p>
+
+  <h3>In the dashboard</h3>
+  <div class="wwn">
+    <div><h4>Orchestrations</h4><p>Runs show as <code>dafx-report_workflow</code> instead of <code>research_report</code>. The custom status is the event log, not our <code>phase</code> object.</p></div>
+    <div><h4>Entities</h4><p>Names include the workflow: <code>dafx-report_workflow-Planner</code>, <code>…-Writer</code>, <code>…-Editor</code>. The key is the run's instance id, so all three entities of a run share one key.</p></div>
+    <div><h4>Activities</h4><p>One per non-agent node: <code>dafx-report_workflow-intake</code>, <code>…-dispatcher</code>, <code>…-section_saver</code>, <code>…-finisher</code>. They appear as tasks in the run's history.</p></div>
+  </div>
+
+  <h3>Which one to use</h3>
+  <div class="wwn">
+    <div><h4>Orchestration</h4><p>The flow is easiest to read as code, or you need Durable Task features directly: timers, external events, sub-orchestrations, your own compact progress status.</p></div>
+    <div><h4>Workflow</h4><p>You want the flow as a reusable, visualisable graph that also runs without the scheduler (in-process). The extension adds durability without you writing an orchestrator.</p></div>
+    <div><h4>Run either</h4><p><code>./demo.sh</code> runs the orchestration version (the default). <code>MODE=workflow ./demo.sh</code> runs the workflow version. Same crash, same log, same dashboard.</p></div>
+  </div>
+</section>
+
+<section class="block" id="agents">
+  <span class="eyebrow">Third and fourth version · MODE=agent · MODE=durable-tools</span>
+  <h2>One agent with tools decides the steps</h2>
+  <p class="lede">In the first two versions we wrote the steps. Here a single <b>Author</b> agent gets the task once and chooses everything: the outline, which tool to call next, and when it is finished. Both versions use the same four tools from <code>report_tools.py</code>: <code>save_section</code>, <code>list_sections</code>, <code>read_section</code> and <code>save_report</code>. The only difference is <b>where the tool loop runs</b>, and that decides what a crash costs.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 960 300" role="img" aria-label="Checkpoint comparison. Agent mode: one durable message wraps the whole loop of model and tool calls; a crash repeats all of it. Durable-tools mode: every model call and tool call is its own checkpoint; a crash repeats only the interrupted tool call.">
+      <text class="d-title" x="10" y="28">MODE=agent: one checkpoint around the whole loop</text>
+      <rect class="d-hub" x="10" y="42" width="560" height="62" rx="10"/>
+      <text class="d-mono" x="22" y="62">one durable message to the Author entity</text>
+      <g>
+        <rect class="d-llm" x="22" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="51" y="86" text-anchor="middle">model</text>
+        <rect class="d-worker" x="86" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="115" y="86" text-anchor="middle">tool</text>
+        <rect class="d-llm" x="150" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="179" y="86" text-anchor="middle">model</text>
+        <rect class="d-worker" x="214" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="243" y="86" text-anchor="middle">s1</text>
+        <rect class="d-llm" x="278" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="307" y="86" text-anchor="middle">model</text>
+        <rect class="d-worker" x="342" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="371" y="86" text-anchor="middle">s2</text>
+        <rect class="d-llm" x="406" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="435" y="86" text-anchor="middle">model</text>
+        <rect class="d-crashbox" x="470" y="70" width="58" height="24" rx="5"/><text class="d-mono" x="499" y="86" text-anchor="middle">s3 💥</text>
+      </g>
+      <text class="d-text" x="590" y="66">Nothing is saved until the message completes.</text>
+      <text class="d-text" x="590" y="84">After the crash the whole message runs again:</text>
+      <text class="d-text" x="590" y="102">every model call above is paid for twice.</text>
+
+      <text class="d-title" x="10" y="160">MODE=durable-tools: a checkpoint after every model call and tool call</text>
+      <g>
+        <rect class="d-llm" x="10" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="39" y="194" text-anchor="middle">model</text>
+        <rect class="d-worker" x="74" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="103" y="194" text-anchor="middle">s1</text>
+        <rect class="d-llm" x="138" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="167" y="194" text-anchor="middle">model</text>
+        <rect class="d-worker" x="202" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="231" y="194" text-anchor="middle">s2</text>
+        <rect class="d-llm" x="266" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="295" y="194" text-anchor="middle">model</text>
+        <rect class="d-crashbox" x="330" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="359" y="194" text-anchor="middle">s3 💥</text>
+        <rect class="d-worker" x="394" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="423" y="194" text-anchor="middle">s3 ↻</text>
+        <rect class="d-llm" x="458" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="487" y="194" text-anchor="middle">model</text>
+        <rect class="d-worker" x="522" y="178" width="58" height="24" rx="5"/><text class="d-mono" x="551" y="194" text-anchor="middle">s4 …</text>
+      </g>
+      <g class="ticks">
+        <path class="d-line hub" d="M68 172 L68 208"/><path class="d-line hub" d="M132 172 L132 208"/><path class="d-line hub" d="M196 172 L196 208"/>
+        <path class="d-line hub" d="M260 172 L260 208"/><path class="d-line hub" d="M324 172 L324 208"/><path class="d-line hub" d="M452 172 L452 208"/><path class="d-line hub" d="M516 172 L516 208"/>
+      </g>
+      <text class="d-text" x="600" y="186">Each teal line is a checkpoint in the history.</text>
+      <text class="d-text" x="600" y="204">After the crash only "s3" runs again, with</text>
+      <text class="d-text" x="600" y="222">the same arguments; no model call is repeated.</text>
+      <text class="d-text" x="10" y="270">model = one call to Luna (Responses API) · s1, s2 … = save_section tool calls · ↻ = run again after the crash</text>
+    </svg>
+  </div>
+
+  <h3>Measured: crash while saving section 3</h3>
+  <div class="tbl">
+    <table class="cmp">
+      <thead><tr><th>Mode</th><th>Run</th><th>Model calls</th><th>Repeated after the crash</th><th>How it found its place again</th></tr></thead>
+      <tbody>
+        <tr><td><code>agent</code></td><td><code>de88c764…</code></td><td>12 (4 more than needed)</td><td>The whole agent run: the task message and every model call before the crash</td><td>The agent called <code>list_sections</code>, saw 2 saved files, read section 2 and carried on. That only works because the files are on disk and the instructions tell it to check</td></tr>
+        <tr><td><code>durable-tools</code></td><td><code>1144c4ef…</code></td><td>8 (the minimum)</td><td>Only the interrupted <code>save_section(3)</code> tool call</td><td>Nothing to work out. The orchestrator replays the history, so the conversation and all earlier tool results are already there</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>What is different from the earlier versions</h3>
+  <div class="wwn">
+    <div><h4>Responses API</h4><p>Luna is a reasoning model and rejects tools on Chat Completions (<code>400: Function tools with reasoning_effort are not supported … use /v1/responses</code>). Both agent modes use <code>OpenAIChatClient</code>, the Responses client, with <code>store=False</code>, so the durable session is the only record of the conversation.</p></div>
+    <div><h4>Nobody calls the agent "again"</h4><p>In <code>agent</code> mode the orchestrator sends one message and waits for the final answer. In <code>durable-tools</code> it does call the agent once per step, but only to hand back the tool results the model asked for. It never decides what comes next.</p></div>
+    <div><h4>Run id</h4><p>Each tool needs to know which run's folder to use. The task text includes <code>run_id: …</code>, and the instructions tell the agent to pass it to every tool. It's simple, but it relies on the model to get it right.</p></div>
+  </div>
+
+  <h3>How durable-tools works</h3>
+  <pre class="code"><span class="c"># the agent only sees declaration-only copies: name, description, schema, no code</span>
+FunctionTool(name=t.name, description=t.description, <span class="y">func=None</span>, input_model=t.parameters())
+
+<span class="k">for</span> step <span class="k">in</span> range(1, MAX_STEPS + 1):
+    resp = <span class="y">yield</span> author.run(...)                        <span class="c"># exactly one model call (it can't run the tools)</span>
+    calls = [c <span class="k">for</span> m <span class="k">in</span> resp.messages <span class="k">for</span> c <span class="k">in</span> m.contents <span class="k">if</span> c.type == <span class="s">"function_call"</span>]
+    <span class="k">if not</span> calls: <span class="k">break</span>                                  <span class="c"># the agent decided it's done</span>
+    results = <span class="y">yield</span> task.when_all([context.call_activity(run_tool, input=c) <span class="k">for</span> c <span class="k">in</span> calls])
+    tool_results = Message(role=<span class="s">"tool"</span>, contents=[Content.from_function_result(...)])
+    <span class="c"># next author.run(messages="", context_messages=[serialize_input_message(tool_results)], ...)</span></pre>
+  <div class="wwn">
+    <div><h4>What</h4><p>A generic loop: a model call, then the requested tools as activities, then the results back to the model. It knows nothing about reports. Parallel tool calls run in parallel through <code>when_all</code>. A tool that fails returns its error to the model as the result, so the agent can react.</p></div>
+    <div><h4>Why</h4><p>It lifts the tool loop out of the agent and into the orchestrator, where every step is recorded in the history. This is the same structure Dapr Agents uses for its durable agent.</p></div>
+    <div><h4>Needs</h4><ul><li>Tool results sent as <code>context_messages</code>: the durable agent only accepts text as <code>messages</code></li><li><code>serialize_input_message</code> comes from the extension's private <code>_response_utils</code>, so pin the package version</li><li>A fixed id per step (<code>context_message_ids</code>), so a redelivered message is never stored twice</li><li>Idempotent tools: an interrupted call runs again</li></ul></div>
+  </div>
+  <p class="note">Earlier failures of this version are visible in the dashboard as two Failed runs. <code>agent_loop 90fa65c5…</code> used Chat Completions with tools (the 400 above). The first <code>tool_loop</code> attempt sent the tool results as <code>messages</code> and got <em>DurableAIAgent only supports text message inputs</em>, which is what led to the <code>context_messages</code> approach.</p>
+</section>
+
+<footer>
+  <span>Source: <code>~/Projects/durable-maf</code> · run it with <code>./demo.sh</code>, or <code>MODE=workflow|agent|durable-tools ./demo.sh</code>, then open <code>http://localhost:8082</code> → <code>durable-maf</code>.</span>
+  <span>Related: <code>docs/payload-limits.md</code> on the 1 MB scheduler limit.</span>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  // Events from run 51da2300ff954dfcbf90aa31e92f5818 (crash on section 3 of 6).
+  // h = history entries added at this point; kind: hub | llm | crash | replay
+  var E = [
+    { t: "10:11:10", what: "client.py schedules research_report", why: "The scheduler records ExecutionStarted with the topic and queues the first orchestrator work item. The client returns at once.", p1: "idle, waiting for work", p2: "not started", h: [["ExecutionStarted {topic, sections: 6}", "hub"]] },
+    { t: "10:11:10", what: "Orchestrator asks for a plan", why: "Worker #1 runs the orchestrator until the first yield: planner.run(). That becomes a message to the Planner entity, and the orchestrator stops.", p1: "running orchestrator", p2: "not started", h: [["EntityCalled Planner", "hub"]] },
+    { t: "10:11:10", what: "Planner calls Luna", why: "The Planner entity sends the prompt through agentgateway and stores the conversation. The structured outline goes back to the orchestration's history.", p1: "Planner → Luna", p2: "not started", llm: 1, h: [["EntityResponse Planner → Outline (6 sections)", "llm"]] },
+    { t: "10:11:19", what: "Writer writes section 1", why: "The orchestrator replays up to the plan (from history), then yields writer.run() for section 1 in the shared writer session.", p1: "Writer → Luna", p2: "not started", llm: 1, h: [["EntityResponse Writer → section 1", "llm"]] },
+    { t: "10:11:19", what: "save_section 1 runs", why: "An activity writes 01-…md and returns the path, which is recorded.", p1: "activity save_section", p2: "not started", h: [["TaskCompleted save_section #1 → path", "hub"]] },
+    { t: "10:11:25", what: "Section 2: write, then save", why: "Same pattern: one recorded model result and one recorded activity result.", p1: "Writer → Luna, save", p2: "not started", llm: 1, h: [["EntityResponse Writer → section 2", "llm"], ["TaskCompleted save_section #2 → path", "hub"]] },
+    { t: "10:11:31", what: "Writer writes section 3", why: "The model result is recorded. That is the last thing worker #1 finishes.", p1: "Writer → Luna", p2: "not started", llm: 1, h: [["EntityResponse Writer → section 3", "llm"]] },
+    { t: "10:11:32", what: "Crash while saving section 3", why: "save_section 3 is scheduled and picked up, then the process calls os._exit(137). No completion is sent. The work item stays locked to a dead worker, and the status freezes at writing 2/6.", p1: "dead (exit 137)", p2: "not started", crash: true, h: [["TaskScheduled save_section #3 (no result)", "crash"]] },
+    { t: "10:11:39", what: "Worker #2 connects", why: "A fresh process registers the same orchestrator, activities and agents against the same task hub. Nothing is copied over from worker #1.", p1: "dead (exit 137)", p2: "connected", crash: true, h: [] },
+    { t: "10:11:43", what: "save_section 3 runs again", why: "The scheduler hands the unfinished activity to worker #2. It overwrites the file, which is safe because the activity is idempotent.", p1: "dead (exit 137)", p2: "activity save_section", crash: true, h: [["TaskCompleted save_section #3 → path", "hub"]] },
+    { t: "10:11:43", what: "Orchestrator replays from the top", why: "Every yield with a recorded result returns instantly: plan, sections 1–3, saves 1–3. No model calls. section_texts and file paths are rebuilt in memory from the history.", p1: "dead (exit 137)", p2: "replaying orchestrator", crash: true, replay: true, h: [] },
+    { t: "10:11:44", what: "Writer writes section 4", why: "The first yield with no result yet. Execution is live again, and the Writer session still holds sections 1–3 as context.", p1: "dead (exit 137)", p2: "Writer → Luna", crash: true, llm: 1, h: [["EntityResponse Writer → section 4", "llm"], ["TaskCompleted save_section #4 → path", "hub"]] },
+    { t: "10:11:57", what: "Sections 5 and 6", why: "Two more write-and-save pairs, each checkpointed.", p1: "dead (exit 137)", p2: "Writer → Luna, save", crash: true, llm: 2, h: [["EntityResponse Writer → section 5", "llm"], ["TaskCompleted save_section #5 → path", "hub"], ["EntityResponse Writer → section 6", "llm"], ["TaskCompleted save_section #6 → path", "hub"]] },
+    { t: "10:12:04", what: "Editor writes the executive summary", why: "One more model call, with the full text rebuilt from recorded responses.", p1: "dead (exit 137)", p2: "Editor → Luna", crash: true, llm: 1, h: [["EntityResponse Editor → summary", "llm"]] },
+    { t: "10:12:09", what: "Report saved, run COMPLETED", why: "save_report writes report.md. The orchestrator returns {title, report, sections}. Total: 8 model calls, none repeated.", p1: "dead (exit 137)", p2: "idle", crash: true, h: [["TaskCompleted save_report → report.md", "hub"], ["ExecutionCompleted {title, report, sections: 6}", "hub"]] }
+  ];
+  var REPLAY_INDEX = 10; // event index at which worker #2 replays
+  var i = 0;
+  var $ = function (id) { return document.getElementById(id); };
+  var range = $("sim-range");
+  range.max = String(E.length - 1);
+
+  function render() {
+    var e = E[i];
+    $("sim-time").textContent = e.t;
+    $("sim-what").textContent = e.what;
+    $("sim-why").textContent = e.why;
+    $("sim-pos").textContent = (i + 1) + " / " + E.length;
+    range.value = String(i);
+    $("sim-prev").disabled = i === 0;
+    $("sim-next").disabled = i === E.length - 1;
+    $("sim-end").disabled = i === E.length - 1;
+
+    var p1 = $("proc1"), p2 = $("proc2");
+    p1.className = "proc " + (e.crash ? "dead" : "alive");
+    p2.className = "proc " + (e.p2 === "not started" ? "off" : "alive");
+    $("proc1s").textContent = e.p1;
+    $("proc2s").textContent = e.p2;
+
+    var llmCalls = 0, replayed = 0;
+    for (var k = 0; k <= i; k++) llmCalls += E[k].llm || 0;
+    if (i >= REPLAY_INDEX) replayed = 4; // plan + sections 1-3 answered from history
+    $("sim-counts").innerHTML =
+      '<span class="chip llm">model calls: ' + llmCalls + '</span>' +
+      '<span class="chip replay">answered from history: ' + replayed + '</span>' +
+      (e.crash ? '<span class="chip crash">worker #1 lost</span>' : '');
+
+    var ol = $("sim-history");
+    ol.innerHTML = "";
+    var n = 0;
+    for (var j = 0; j <= i; j++) {
+      E[j].h.forEach(function (h) {
+        n++;
+        var li = document.createElement("li");
+        var isReplayed = i >= REPLAY_INDEX && j <= 6 && h[1] === "llm";
+        if (j === i) li.className = "new";
+        if (isReplayed) li.className += " replayed";
+        var tagKind = isReplayed ? "replay" : h[1];
+        var tagText = isReplayed ? "replayed" : ({ hub: "recorded", llm: "model call", crash: "in flight" })[h[1]];
+        li.innerHTML = '<span class="i">' + n + '</span><span class="t"></span><span class="tag ' + tagKind + '">' + tagText + '</span>';
+        li.querySelector(".t").textContent = h[0];
+        ol.appendChild(li);
+      });
+    }
+    if (!n) ol.innerHTML = '<li><span class="empty">No events yet.</span></li>';
+    var last = ol.querySelector("li.new");
+    if (last && last.scrollIntoView) { ol.scrollTop = ol.scrollHeight; }
+  }
+  $("sim-next").addEventListener("click", function () { if (i < E.length - 1) { i++; render(); } });
+  $("sim-prev").addEventListener("click", function () { if (i > 0) { i--; render(); } });
+  $("sim-end").addEventListener("click", function () { i = E.length - 1; render(); });
+  range.addEventListener("input", function () { i = parseInt(range.value, 10) || 0; render(); });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.target && /input|textarea/i.test(ev.target.tagName)) return;
+    if (ev.key === "ArrowRight") { $("sim-next").click(); }
+    if (ev.key === "ArrowLeft") { $("sim-prev").click(); }
+  });
+  // Open on the crash so the first frame shows the interesting state.
+  i = 7;
+  render();
+})();
+</script>

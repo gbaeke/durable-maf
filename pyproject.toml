@@ -1,0 +1,16 @@
+[project]
+name = "durable-maf"
+version = "0.1.0"
+description = "Durable agent demo: Microsoft Agent Framework + Durable Task Scheduler emulator + agentgateway"
+authors = [
+    { name = "Geert Baeke", email = "geert@baeke.info" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "agent-framework-durabletask==1.0.0",
+    "agent-framework-openai>=1.18.1",
+    "python-dotenv>=1.2.4",
+]
+
+[tool.ruff]
+line-length = 120
